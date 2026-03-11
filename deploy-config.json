@@ -1,0 +1,35 @@
+{
+  "environments": {
+    "production": {
+      "host": "t.backpedal.co",
+      "port": 22,
+      "username": "root",
+      "remotePath": "/var/www/trackit",
+      "preDeployCommands": [
+        "mkdir -p /var/www/trackit",
+        "chown -R $USER:$USER /var/www/trackit"
+      ],
+      "postDeployCommands": [
+        "systemctl restart nginx"
+      ]
+    },
+    "staging": {
+      "host": "staging.example.com",
+      "port": 22,
+      "username": "root",
+      "remotePath": "/var/www/staging/trackit",
+      "preDeployCommands": [
+        "mkdir -p /var/www/staging/trackit",
+        "chown -R $USER:$USER /var/www/staging/trackit"
+      ],
+      "postDeployCommands": [
+        "systemctl restart nginx"
+      ]
+    }
+  },
+  "deploymentSettings": {
+    "deleteRemote": true,
+    "backupBeforeDeploy": true,
+    "backupLocation": "/var/backups/trackit"
+  }
+}
