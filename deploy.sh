@@ -233,16 +233,16 @@ fi
 # --- Generate deployment metadata ---
 
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-cat > "dist/spa/deployment-info.json" << DEOF
-{
-  "timestamp": "$TIMESTAMP",
-  "git_branch": "$CURRENT_BRANCH",
-  "git_commit": "$GIT_COMMIT",
-  "git_commit_short": "$GIT_COMMIT_SHORT",
-  "git_commit_message": "$GIT_MESSAGE",
-  "deployed_by": "$(whoami)@$(hostname)"
-}
-DEOF
+DEPLOYED_BY="$(whoami)@$(hostname)"
+jq -n \
+  --arg ts "$TIMESTAMP" \
+  --arg branch "$CURRENT_BRANCH" \
+  --arg commit "$GIT_COMMIT" \
+  --arg short "$GIT_COMMIT_SHORT" \
+  --arg msg "$GIT_MESSAGE" \
+  --arg by "$DEPLOYED_BY" \
+  '{timestamp: $ts, git_branch: $branch, git_commit: $commit, git_commit_short: $short, git_commit_message: $msg, deployed_by: $by}' \
+  > "dist/spa/deployment-info.json"
 
 # Copy version.json into dist if it exists
 if [ -f "version.json" ]; then

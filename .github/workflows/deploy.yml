@@ -31,16 +31,16 @@ jobs:
 
       - name: Generate deployment metadata
         run: |
-          cat > dist/spa/deployment-info.json << EOF
-          {
-            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-            "git_branch": "${{ github.ref_name }}",
-            "git_commit": "${{ github.sha }}",
-            "git_commit_short": "$(echo ${{ github.sha }} | cut -c1-7)",
-            "git_commit_message": "${{ github.event.head_commit.message }}",
-            "deployed_by": "github-actions"
-          }
-          EOF
+          jq -n \
+            --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg commit "${{ github.sha }}" \
+            --arg short "$(echo ${{ github.sha }} | cut -c1-7)" \
+            --arg msg "$COMMIT_MSG" \
+            '{timestamp: $ts, git_branch: $branch, git_commit: $commit, git_commit_short: $short, git_commit_message: $msg, deployed_by: "github-actions"}' \
+            > dist/spa/deployment-info.json
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
 
       - name: Copy version.json if exists
         run: |
