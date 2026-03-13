@@ -49,9 +49,21 @@ server {
     location / {
         try_files $uri $uri/ /index.html;
     }
-    
-    # Cache static assets
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
+
+    # Never cache index.html — it references content-hashed assets
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
+        add_header Expires 0;
+    }
+
+    # Never cache deployment metadata
+    location = /deployment-info.json {
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+    }
+
+    # Cache content-hashed static assets aggressively
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
         expires 30d;
         add_header Cache-Control "public, no-transform";
     }
@@ -72,9 +84,9 @@ fi
 echo -e "${BLUE}Testing Nginx configuration...${NC}"
 nginx -t
 
-# Restart Nginx
-echo -e "${BLUE}Restarting Nginx...${NC}"
-systemctl restart nginx
+# Reload Nginx (no downtime)
+echo -e "${BLUE}Reloading Nginx...${NC}"
+systemctl reload nginx
 
 # Set up SSL with Let's Encrypt
 echo -e "${BLUE}Setting up SSL with Let's Encrypt...${NC}"

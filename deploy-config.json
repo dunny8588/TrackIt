@@ -10,7 +10,7 @@
         "chown -R $USER:$USER /var/www/trackit"
       ],
       "postDeployCommands": [
-        "systemctl restart nginx"
+        "systemctl reload nginx"
       ]
     },
     "staging": {
@@ -23,7 +23,7 @@
         "chown -R $USER:$USER /var/www/staging/trackit"
       ],
       "postDeployCommands": [
-        "systemctl restart nginx"
+        "systemctl reload nginx"
       ]
     }
   },

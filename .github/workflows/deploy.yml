@@ -1,0 +1,90 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply custom patches
+        run: |
+          if [ -f custom_patches/install_custom_columns.sh ]; then
+            bash custom_patches/install_custom_columns.sh
+          fi
+
+      - name: Build for production
+        run: npx quasar build -m spa
+
+      - name: Generate deployment metadata
+        run: |
+          cat > dist/spa/deployment-info.json << EOF
+          {
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "git_branch": "${{ github.ref_name }}",
+            "git_commit": "${{ github.sha }}",
+            "git_commit_short": "$(echo ${{ github.sha }} | cut -c1-7)",
+            "git_commit_message": "${{ github.event.head_commit.message }}",
+            "deployed_by": "github-actions"
+          }
+          EOF
+
+      - name: Copy version.json if exists
+        run: |
+          if [ -f version.json ]; then
+            cp version.json dist/spa/version.json
+          fi
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Backup current deployment
+        run: |
+          BACKUP_TS=$(date +"%Y%m%d_%H%M%S")
+          ssh -i ~/.ssh/deploy_key -p 22 root@t.backpedal.co \
+            "mkdir -p /var/backups/trackit && \
+             if [ -f /var/www/trackit/index.html ]; then \
+               tar -czf /var/backups/trackit/trackit_${BACKUP_TS}.tar.gz -C /var/www/trackit .; \
+             fi"
+
+      - name: Deploy via rsync
+        run: |
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/deploy_key -p 22" \
+            dist/spa/ root@t.backpedal.co:/var/www/trackit/
+
+      - name: Reload nginx
+        run: |
+          ssh -i ~/.ssh/deploy_key -p 22 root@t.backpedal.co "systemctl reload nginx"
+
+      - name: Verify deployment
+        run: |
+          sleep 3
+          REMOTE_COMMIT=$(curl -sf https://t.backpedal.co/deployment-info.json | jq -r '.git_commit')
+          if [ "$REMOTE_COMMIT" = "${{ github.sha }}" ]; then
+            echo "Deployment verified! Commit $(echo ${{ github.sha }} | cut -c1-7) is live."
+          else
+            echo "Verification failed! Expected ${{ github.sha }}, got $REMOTE_COMMIT"
+            exit 1
+          fi
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
