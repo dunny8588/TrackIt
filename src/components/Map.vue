@@ -416,7 +416,11 @@ export default {
           maxZoom: 22, // Increased max zoom level
           layers: [osm]
         })
-        
+
+        // Custom pane for accuracy circles — renders below markers (default markerPane z-index is 600)
+        this.map.createPane('accuracyPane')
+        this.map.getPane('accuracyPane').style.zIndex = 350
+
         this.map.addEventListener('zoom', e => {
           if (!e.flyTo) {
             this.flyToZoom = e.target.getZoom()
@@ -547,21 +551,22 @@ export default {
 
       this.map.flyTo(position, zoom)
     },
-    generateIcon (id, name, color, positionSource = null, isMostRecent = false, sequenceNumber = null) {
+    generateIcon (id, name, color, positionSource = null, isMostRecent = false, sequenceNumber = null, stackCount = null) {
       return L.divIcon({
-        className: `my-div-icon icon-${id}`,
-        iconSize: new L.Point(20, 20),
-        html: getIconHTML(name, color, this.params.needShowNamesOnMap, positionSource, isMostRecent, sequenceNumber)
+        className: `my-div-icon point-icon-${id}`,
+        iconSize: new L.Point(28, 28),
+        html: getIconHTML(name, color, this.params.needShowNamesOnMap, positionSource, isMostRecent, sequenceNumber, stackCount)
       })
     },
-    getAccuracyParams (message) {
+    getAccuracyParams (message, isMostRecent = false) {
       const position = [message['position.latitude'], message['position.longitude']],
         // Use position.accuracy if available, otherwise fall back to hdop/pdop
         accuracy = message['position.accuracy'] || message['position.hdop'] || message['position.pdop'] || 0,
         positionSource = message['position.source'] || null,
-        // Set circle color based on position source: black for GPS, orange for LBS
-        circleColor = positionSource ? 
-                     (positionSource.toLowerCase() === 'gps' ? '#000000' : 
+        // Set circle color: green for most recent, black for GPS, orange for LBS
+        circleColor = isMostRecent ? '#00AA00' :
+                     positionSource ?
+                     (positionSource.toLowerCase() === 'gps' ? '#000000' :
                       positionSource.toLowerCase() === 'lbs' ? '#FFA500' : '#444') : '#444',
         circleStyle = {
           stroke: true,
@@ -570,7 +575,8 @@ export default {
           opacity: 0.7,
           fillOpacity: 0.15,
           fillColor: circleColor,
-          clickable: false
+          clickable: false,
+          pane: 'accuracyPane'
         }
       return { position, accuracy, circleStyle, positionSource }
     },
@@ -653,6 +659,7 @@ export default {
       this.markers[id].main.positionSource = positionSource;
       this.markers[id].id = id;
       this.markers[id].color = currentColor;
+      this.markers[id].deviceName = name;
       
       // Create collections for all position points and accuracy circles
       this.markers[id].points = {
@@ -665,39 +672,15 @@ export default {
         lbs: []
       };
       
-      // Create the main accuracy circle
+      // Create the main accuracy circle (kept as ghost object for player/update code, not shown on map)
       const { position: pos, accuracy, circleStyle } = this.getAccuracyParams(lastMessage)
       this.markers[id].accuracy = L.circle(pos, accuracy, circleStyle)
-      this.markers[id].accuracy.addTo(this.map)
       
       // Initialize all points from messages
       this.initAllPoints(id);
       
-      this.markers[id].main.on('add', e => {
-        console.log('Main marker added for device:', id);
-        this.updateMarkerDirection(id, direction)
-        if (this.messages[id] && this.messages[id].length && this.selectedDeviceId === parseInt(id)) {
-          // selected logic
-        }
-      })
-      this.markers[id].main.on('click', e => {
-        console.log('Main marker clicked for device:', id);
-        this.telemetryDeviceId = parseInt(id)
-        this.$emit('update-telemetry-device-id', this.telemetryDeviceId)
-      })
-      this.markers[id].main.on('move', e => {
-        console.log('Main marker moved for device:', id);
-        if (this.player.status === 'stop') {
-          this.updateMarkerDirection(id, this.messages[id][this.messages[id].length - 1]['position.direction'])
-        }
-      })
-      this.markers[id].main.on('contextmenu', e => {
-        console.log('Main marker context menu for device:', id);
-        this.currentColorId = id
-        this.currentColorModel = this.markers[id].color
-        this.$refs.colorModal.show()
-      })
-      this.markers[id].main.addTo(this.map)
+      // Main marker kept as ghost object (not added to map) for data storage
+      // Click/contextmenu handlers are on historical point markers instead
     },
     // Initialize all points for a device with sequential numbering
     initAllPoints(id) {
@@ -708,43 +691,30 @@ export default {
       // Clear existing points first
       this.clearAllPoints(id);
       
-      // Find the last indices for GPS and LBS to mark them as most recent
-      const lastGpsIndex = this.findLastIndex(this.messages[id], msg => 
-        msg['position.source'] && msg['position.source'].toLowerCase() === 'gps');
-      
-      const lastLbsIndex = this.findLastIndex(this.messages[id], msg => 
-        msg['position.source'] && msg['position.source'].toLowerCase() === 'lbs');
-      
-      // Store the latest indices
-      if (lastGpsIndex !== -1) {
-        this.devicesState[id].lastPositions.gps = lastGpsIndex;
-      }
-      
-      if (lastLbsIndex !== -1) {
-        this.devicesState[id].lastPositions.lbs = lastLbsIndex;
-      }
-      
       // Create filtered arrays of valid GPS and LBS points
       const validGpsPoints = [];
       const validLbsPoints = [];
       
       // First pass: collect valid points
-      this.messages[id].forEach((message, index) => {
+      // Use x-flespi-message-index (original state array index) not the filtered array index
+      this.messages[id].forEach((message) => {
         if (message['position.latitude'] && message['position.longitude']) {
           const positionSource = message['position.source'];
           if (!positionSource) return;
-          
+
           const source = positionSource.toLowerCase();
           if (source !== 'gps' && source !== 'lbs') return;
-          
+
           // Skip LBS points if the toggle is off
           if (source === 'lbs' && !this.params.needShowLBSPoints) return;
-          
-          // Add point to appropriate array
+
+          const originalIndex = message['x-flespi-message-index'];
+
+          // Add point to appropriate array with original state index
           if (source === 'gps') {
-            validGpsPoints.push({ message, index });
+            validGpsPoints.push({ message, index: originalIndex });
           } else if (source === 'lbs') {
-            validLbsPoints.push({ message, index });
+            validLbsPoints.push({ message, index: originalIndex });
           }
         }
       });
@@ -758,164 +728,226 @@ export default {
       
       const sortedGpsPoints = sortPoints(validGpsPoints);
       const sortedLbsPoints = sortPoints(validLbsPoints);
-      
-      // Create markers for GPS points with sequential numbering
+
+      // Store the most recent indices (from sorted arrays, not findLastIndex)
+      if (sortedGpsPoints.length) {
+        this.devicesState[id].lastPositions.gps = sortedGpsPoints[0].index;
+      }
+      if (sortedLbsPoints.length) {
+        this.devicesState[id].lastPositions.lbs = sortedLbsPoints[0].index;
+      }
+
+      // Group GPS points by position (lat+lng key) to detect overlaps
+      const gpsGroups = new Map();
       sortedGpsPoints.forEach((point, sequenceIndex) => {
-        const { message, index } = point;
+        const key = `${point.message['position.latitude']},${point.message['position.longitude']}`;
+        if (!gpsGroups.has(key)) {
+          gpsGroups.set(key, []);
+        }
+        gpsGroups.get(key).push({ ...point, sequenceIndex });
+      });
+
+      // Create one marker per unique GPS position; if multiple points share a position,
+      // show only the most recent (first in sorted order) with a stack badge
+      gpsGroups.forEach((group) => {
+        // group is sorted by timestamp desc (inherits from sortedGpsPoints order)
+        const representative = group[0]; // most recent at this position
+        const { message, index, sequenceIndex } = representative;
         const position = [message['position.latitude'], message['position.longitude']];
-        const isMostRecent = index === lastGpsIndex;
-        
-        // Simplified approach to numbering:
-        // Always start from 1 for historical points
-        // Keep the main marker as 0
-        // Don't skip points, but the most recent might overlap with main marker
-        const sequenceNumber = sequenceIndex + 1; // Start from 1 for all historical points
-        
-        // Create marker for this point
-        // Set z-index based on sequence number to ensure newer points appear on top
-        // Higher z-index values appear on top, so we use 1000 - sequenceNumber
-        // This ensures sequence 1 is on top of sequence 2, etc.
-        const zIndexOffset = 1000 - sequenceNumber; // Highest numbers for newest points
-        
+        const isMostRecent = sequenceIndex === 0; // most recent across ALL GPS points
+        const sequenceNumber = sequenceIndex + 1;
+        const stackCount = group.length; // how many points overlap here
+
+        const zIndexOffset = isMostRecent ? 1100 : (1000 - sequenceNumber);
+
         const pointMarker = L.marker(position, {
           icon: this.generateIcon(
-            id, 
-            this.markers[id].main.options.title, 
-            this.markers[id].color, 
-            message['position.source'], 
+            id,
+            this.markers[id].main.options.title,
+            this.markers[id].color,
+            message['position.source'],
             isMostRecent,
-            sequenceNumber
+            sequenceNumber,
+            stackCount
           ),
           draggable: false,
           messageIndex: index,
-          zIndexOffset: zIndexOffset // This controls stacking order
+          zIndexOffset: zIndexOffset
         });
-        
-        // Add click event to show message details
+
+        // Track which group member is currently shown (for click-to-cycle)
+        let cycleIndex = 0;
+        const groupIndices = group.map(g => g.index);
+        const groupMessages = group.map(g => g.message);
+
+        // Click to cycle through stacked messages and show details
         pointMarker.on('click', e => {
-          console.log('Point marker clicked:', message);
-            
-            // Remove previous message point and info box
-            if (this.map.messagePoint) { this.map.messagePoint.remove() }
-            if (this.map.messageAccuracy) { this.map.messageAccuracy.remove(); this.map.messageAccuracy = null; }
-            if (this.map.infoBox) { this.map.infoBox.remove(); this.map.infoBox = null; }
-            
-            // Create a pulse effect
-            let pulseColor = message['position.source'].toLowerCase() === 'gps' ? '#000000' : '#FFA500';
-            this.map.messagePoint = L.marker(position, {
-              icon: L.divIcon({
-                className: `my-round-marker-wrapper`,
-                iconSize: new L.Point(10, 10),
-                html: `<div class="my-round-marker" style="background-color: ${pulseColor};"></div>`
-              })
-            });
-            this.map.messagePoint.addTo(this.map);
-            
-            // Show accuracy circle
-            if (message['position.accuracy']) {
-              const { accuracy, circleStyle } = this.getAccuracyParams(message);
-              this.map.messageAccuracy = L.circle(position, accuracy, circleStyle);
-              this.map.messageAccuracy.addTo(this.map);
-            }
-            
-            // Create and show info box
-            this.createInfoBox(message, position);
-            
-            // Select the message in the UI
-            this.$store.commit(`messages/${id}/setSelected`, [index]);
+          const currentMsg = groupMessages[cycleIndex];
+          const currentIdx = groupIndices[cycleIndex];
+
+          // Select device for telemetry display
+          this.telemetryDeviceId = parseInt(id);
+          this.$emit('update-telemetry-device-id', this.telemetryDeviceId);
+
+          // Remove previous message point and info box
+          if (this.map.messagePoint) { this.map.messagePoint.remove(); }
+          if (this.map.messageAccuracy) { this.map.messageAccuracy.remove(); this.map.messageAccuracy = null; }
+          if (this.map.infoBox) { this.map.infoBox.remove(); this.map.infoBox = null; }
+
+          // Pulse effect
+          const isCurrentMostRecent = group[cycleIndex].sequenceIndex === 0;
+          let pulseColor = isCurrentMostRecent ? '#00AA00' :
+            currentMsg['position.source'].toLowerCase() === 'gps' ? '#000000' : '#FFA500';
+          this.map.messagePoint = L.marker(position, {
+            icon: L.divIcon({
+              className: 'my-round-marker-wrapper',
+              iconSize: new L.Point(10, 10),
+              html: `<div class="my-round-marker" style="background-color: ${pulseColor};"></div>`
+            })
           });
-          
-          // Add to the map and store in our collections
-          pointMarker.addTo(this.map);
-          this.markers[id].points['gps'].push(pointMarker);
-          
-          // Create accuracy circle if needed
-          if (message['position.accuracy']) {
-            const { accuracy, circleStyle } = this.getAccuracyParams(message);
-            const circle = L.circle(position, accuracy, circleStyle);
-            circle.addTo(this.map);
-            this.markers[id].accuracyCircles['gps'].push(circle);
+          this.map.messagePoint.addTo(this.map);
+
+          // Show accuracy circle
+          if (currentMsg['position.accuracy']) {
+            const { accuracy, circleStyle } = this.getAccuracyParams(currentMsg, isCurrentMostRecent);
+            this.map.messageAccuracy = L.circle(position, accuracy, circleStyle);
+            this.map.messageAccuracy.addTo(this.map);
           }
+
+          // Show info box
+          this.createInfoBox(currentMsg, position);
+
+          // Select the message in the UI
+          this.$store.commit(`messages/${id}/setSelected`, [currentIdx]);
+
+          // Advance cycle for next click
+          cycleIndex = (cycleIndex + 1) % group.length;
         });
+
+        // Right-click to open colour picker
+        pointMarker.on('contextmenu', e => {
+          this.currentColorId = id;
+          this.currentColorModel = this.markers[id].color;
+          this.$refs.colorModal.show();
+        });
+
+        // Add to map
+        pointMarker.addTo(this.map);
+        this.markers[id].points['gps'].push(pointMarker);
+
+        // Create accuracy circle for the representative point
+        if (message['position.accuracy']) {
+          const { accuracy, circleStyle } = this.getAccuracyParams(message, isMostRecent);
+          const circle = L.circle(position, accuracy, circleStyle);
+          circle.addTo(this.map);
+          this.markers[id].accuracyCircles['gps'].push(circle);
+        }
+      });
         
-        // Create markers for LBS points with sequential numbering
-        sortedLbsPoints.forEach((point, sequenceIndex) => {
-          const { message, index } = point;
-          const position = [message['position.latitude'], message['position.longitude']];
-          const isMostRecent = index === lastLbsIndex;
-          
-          // Simplified approach to numbering:
-          // Always start from 1 for historical points
-          // Keep the main marker as 0
-          // Don't skip points, but the most recent might overlap with main marker
-          const sequenceNumber = sequenceIndex + 1; // Start from 1 for all historical points
-          
-          // Create marker for this point
-          // Set z-index based on sequence number to ensure newer points appear on top
-          // Higher z-index values appear on top, so we use 1000 - sequenceNumber
-          // This ensures sequence 1 is on top of sequence 2, etc.
-          const zIndexOffset = 1000 - sequenceNumber; // Highest numbers for newest points
-          
-          const pointMarker = L.marker(position, {
-            icon: this.generateIcon(
-              id, 
-              this.markers[id].main.options.title, 
-              this.markers[id].color, 
-              message['position.source'], 
-              isMostRecent,
-              sequenceNumber
-            ),
-            draggable: false,
-            messageIndex: index,
-            zIndexOffset: zIndexOffset // This controls stacking order
-          });
-          
-          // Add click event to show message details
-          pointMarker.on('click', e => {
-            console.log('Point marker clicked:', message);
-            
-            // Remove previous message point and info box
-            if (this.map.messagePoint) { this.map.messagePoint.remove() }
-            if (this.map.messageAccuracy) { this.map.messageAccuracy.remove(); this.map.messageAccuracy = null; }
-            if (this.map.infoBox) { this.map.infoBox.remove(); this.map.infoBox = null; }
-            
-            // Create a pulse effect
-            let pulseColor = message['position.source'].toLowerCase() === 'gps' ? '#000000' : '#FFA500';
-            this.map.messagePoint = L.marker(position, {
-              icon: L.divIcon({
-                className: `my-round-marker-wrapper`,
-                iconSize: new L.Point(10, 10),
-                html: `<div class="my-round-marker" style="background-color: ${pulseColor};"></div>`
-              })
-            });
-            this.map.messagePoint.addTo(this.map);
-            
-            // Show accuracy circle
-            if (message['position.accuracy']) {
-              const { accuracy, circleStyle } = this.getAccuracyParams(message);
-              this.map.messageAccuracy = L.circle(position, accuracy, circleStyle);
-              this.map.messageAccuracy.addTo(this.map);
-            }
-            
-            // Create and show info box
-            this.createInfoBox(message, position);
-            
-            // Select the message in the UI
-            this.$store.commit(`messages/${id}/setSelected`, [index]);
-          });
-          
-          // Add to the map and store in our collections
-          pointMarker.addTo(this.map);
-          this.markers[id].points['lbs'].push(pointMarker);
-          
-          // Create accuracy circle if needed
-          if (message['position.accuracy']) {
-            const { accuracy, circleStyle } = this.getAccuracyParams(message);
-            const circle = L.circle(position, accuracy, circleStyle);
-            circle.addTo(this.map);
-            this.markers[id].accuracyCircles['lbs'].push(circle);
-          }
+      // Group LBS points by position to detect overlaps
+      const lbsGroups = new Map();
+      sortedLbsPoints.forEach((point, sequenceIndex) => {
+        const key = `${point.message['position.latitude']},${point.message['position.longitude']}`;
+        if (!lbsGroups.has(key)) {
+          lbsGroups.set(key, []);
+        }
+        lbsGroups.get(key).push({ ...point, sequenceIndex });
+      });
+
+      // Create one marker per unique LBS position with stack badge
+      lbsGroups.forEach((group) => {
+        const representative = group[0];
+        const { message, index, sequenceIndex } = representative;
+        const position = [message['position.latitude'], message['position.longitude']];
+        const isMostRecent = sequenceIndex === 0;
+        const sequenceNumber = sequenceIndex + 1;
+        const stackCount = group.length;
+
+        const zIndexOffset = isMostRecent ? 1100 : (1000 - sequenceNumber);
+
+        const pointMarker = L.marker(position, {
+          icon: this.generateIcon(
+            id,
+            this.markers[id].main.options.title,
+            this.markers[id].color,
+            message['position.source'],
+            isMostRecent,
+            sequenceNumber,
+            stackCount
+          ),
+          draggable: false,
+          messageIndex: index,
+          zIndexOffset: zIndexOffset
         });
+
+        // Track which group member is currently shown (for click-to-cycle)
+        let cycleIndex = 0;
+        const groupIndices = group.map(g => g.index);
+        const groupMessages = group.map(g => g.message);
+
+        // Click to cycle through stacked messages and show details
+        pointMarker.on('click', e => {
+          const currentMsg = groupMessages[cycleIndex];
+          const currentIdx = groupIndices[cycleIndex];
+
+          // Select device for telemetry display
+          this.telemetryDeviceId = parseInt(id);
+          this.$emit('update-telemetry-device-id', this.telemetryDeviceId);
+
+          // Remove previous message point and info box
+          if (this.map.messagePoint) { this.map.messagePoint.remove(); }
+          if (this.map.messageAccuracy) { this.map.messageAccuracy.remove(); this.map.messageAccuracy = null; }
+          if (this.map.infoBox) { this.map.infoBox.remove(); this.map.infoBox = null; }
+
+          // Pulse effect
+          const isCurrentMostRecent = group[cycleIndex].sequenceIndex === 0;
+          let pulseColor = isCurrentMostRecent ? '#00AA00' :
+            currentMsg['position.source'].toLowerCase() === 'gps' ? '#000000' : '#FFA500';
+          this.map.messagePoint = L.marker(position, {
+            icon: L.divIcon({
+              className: 'my-round-marker-wrapper',
+              iconSize: new L.Point(10, 10),
+              html: `<div class="my-round-marker" style="background-color: ${pulseColor};"></div>`
+            })
+          });
+          this.map.messagePoint.addTo(this.map);
+
+          // Show accuracy circle
+          if (currentMsg['position.accuracy']) {
+            const { accuracy, circleStyle } = this.getAccuracyParams(currentMsg, isCurrentMostRecent);
+            this.map.messageAccuracy = L.circle(position, accuracy, circleStyle);
+            this.map.messageAccuracy.addTo(this.map);
+          }
+
+          // Show info box
+          this.createInfoBox(currentMsg, position);
+
+          // Select the message in the UI
+          this.$store.commit(`messages/${id}/setSelected`, [currentIdx]);
+
+          // Advance cycle for next click
+          cycleIndex = (cycleIndex + 1) % group.length;
+        });
+
+        // Right-click to open colour picker
+        pointMarker.on('contextmenu', e => {
+          this.currentColorId = id;
+          this.currentColorModel = this.markers[id].color;
+          this.$refs.colorModal.show();
+        });
+
+        // Add to map
+        pointMarker.addTo(this.map);
+        this.markers[id].points['lbs'].push(pointMarker);
+
+        // Create accuracy circle for the representative point
+        if (message['position.accuracy']) {
+          const { accuracy, circleStyle } = this.getAccuracyParams(message, isMostRecent);
+          const circle = L.circle(position, accuracy, circleStyle);
+          circle.addTo(this.map);
+          this.markers[id].accuracyCircles['lbs'].push(circle);
+        }
+      });
     },
     
     // Helper to find the last index in an array meeting a condition
@@ -974,14 +1006,60 @@ export default {
       return this.messages[id].reduce((acc, message) => {
         // The messages array should already be filtered for LBS points,
         // but we double-check here to ensure tracks are consistent
-        if (!this.params.needShowLBSPoints && 
-            message['position.source'] && 
+        if (!this.params.needShowLBSPoints &&
+            message['position.source'] &&
             message['position.source'].toLowerCase() === 'lbs') {
           return acc;
         }
         acc.push([message['position.latitude'], message['position.longitude']])
         return acc
       }, [])
+    },
+    // Build coloured track segments: black for GPS, orange for LBS
+    buildColouredTrack (id) {
+      // Remove existing coloured track
+      if (this.tracks[id] && this.tracks[id].coloured) {
+        this.tracks[id].coloured.remove()
+        delete this.tracks[id].coloured
+      }
+      if (!this.messages[id] || !this.messages[id].length) return
+
+      const segments = []
+      let currentSegment = null
+
+      this.messages[id].forEach(message => {
+        if (!message['position.latitude'] || !message['position.longitude']) return
+        const source = (message['position.source'] || '').toLowerCase()
+        if (!this.params.needShowLBSPoints && source === 'lbs') return
+
+        const color = source === 'lbs' ? '#FFA500' : '#000000'
+        const point = [message['position.latitude'], message['position.longitude']]
+
+        if (!currentSegment || currentSegment.color !== color) {
+          // Start new segment, overlapping last point for continuity
+          const newSegment = { color, points: [] }
+          if (currentSegment && currentSegment.points.length) {
+            newSegment.points.push(currentSegment.points[currentSegment.points.length - 1])
+          }
+          newSegment.points.push(point)
+          segments.push(newSegment)
+          currentSegment = newSegment
+        } else {
+          currentSegment.points.push(point)
+        }
+      })
+
+      const group = L.layerGroup()
+      segments.forEach(seg => {
+        if (seg.points.length >= 2) {
+          L.polyline(seg.points, { weight: 4, color: seg.color }).addTo(group)
+        }
+      })
+      group.addTo(this.map)
+
+      if (this.tracks[id] && typeof this.tracks[id] === 'object') {
+        this.tracks[id].coloured = group
+      }
     },
     onResize () {
       if (this.map) {
@@ -1003,6 +1081,9 @@ export default {
         
         // Remove tracks
         if (this.tracks[id]) {
+          if (this.tracks[id].coloured) {
+            this.tracks[id].coloured.remove()
+          }
           if (this.tracks[id].tail && this.tracks[id].tail instanceof L.Polyline) {
             this.tracks[id].tail.remove()
           }
@@ -1355,21 +1436,21 @@ export default {
           return tail
         }, [])
       messagesIndexes.forEach((messageIndex) => {
-        if (this.markers[id] && this.markers[id] instanceof L.Marker) {
+        if (this.markers[id] && this.markers[id].main && this.markers[id].main instanceof L.Marker) {
           const message = this.messages[id][messageIndex]
-          const havePosition = message && 
-                              typeof message['position.latitude'] === 'number' && 
+          const havePosition = message &&
+                              typeof message['position.latitude'] === 'number' &&
                               typeof message['position.longitude'] === 'number'
-          
+
           // Skip LBS points if the toggle is off
-          if (!this.params.needShowLBSPoints && 
-              message && message['position.source'] && 
+          if (!this.params.needShowLBSPoints &&
+              message && message['position.source'] &&
               message['position.source'].toLowerCase() === 'lbs') {
             // We skip updating the marker for LBS points when they're filtered
             this.player.currentMsgIndex = messageIndex
             return;
           }
-          
+
           this.player.currentMsgIndex = messageIndex
           if (havePosition) {
             const pos = [message['position.latitude'], message['position.longitude']]
@@ -1384,37 +1465,37 @@ export default {
               }
               duration = duration - 50
               if (duration) {
-                this.markers[id].slideTo(pos, { duration: duration })
+                this.markers[id].main.slideTo(pos, { duration: duration })
               } else {
-                this.markers[id].setLatLng(pos).update()
+                this.markers[id].main.setLatLng(pos).update()
               }
               this.updateMarkerDirection(id, message['position.direction'])
-              
+
               // Update marker with position source information
               this.updateMarker(id, pos, message['position.direction'], message)
             } else {
-              this.markers[id].setLatLng(pos).update()
+              this.markers[id].main.setLatLng(pos).update()
               this.updateMarker(id, pos, message['position.direction'], message)
             }
-            
+
             // Get accuracy parameters with the new position source
             const { accuracy, circleStyle } = this.getAccuracyParams(message)
             this.markers[id].accuracy.setRadius(accuracy)
             this.markers[id].accuracy.setLatLng(pos)
-            
+
             // Update accuracy circle style based on position source
             this.markers[id].accuracy.setStyle(circleStyle)
           } else {
             const message = this.messages[id][lastMessageIndexWithPosition]
             const pos = tail[tail.length - 1]
-            this.markers[id].setLatLng(pos).update()
+            this.markers[id].main.setLatLng(pos).update()
             this.updateMarker(id, pos, message['position.direction'], message)
-            
+
             // Get accuracy parameters with the new position source
             const { accuracy, circleStyle } = this.getAccuracyParams(message)
             this.markers[id].accuracy.setRadius(accuracy)
             this.markers[id].accuracy.setLatLng(pos)
-            
+
             // Update accuracy circle style based on position source
             this.markers[id].accuracy.setStyle(circleStyle)
           }
@@ -1701,12 +1782,13 @@ export default {
         const name = this.activeDevices.filter(device => device.id === parseInt(id))[0].name || `#${id}`,
           position = [this.messages[id][this.messages[id].length - 1]['position.latitude'], this.messages[id][this.messages[id].length - 1]['position.longitude']]
         this.initMarker(id, name, position)
-        /* init track */
-        this.tracks[id] = L.polyline(this.getLatLngArrByDevice(id), { weight: 4, color: this.markers[id] ? this.markers[id].color : this.devicesColors[id] }).addTo(this.map)
+        /* init track — invisible base polyline for click handling, coloured segments on top */
+        this.tracks[id] = L.polyline(this.getLatLngArrByDevice(id), { weight: 10, opacity: 0, color: '#000' }).addTo(this.map)
         this.tracks[id].on('click', (e) => {
           console.log('Track clicked for device (init):', id);
           this.showMessageByTrackClick(e, id, this.tracks[id]);
         })
+        this.buildColouredTrack(id)
 
         if (Number.parseInt(id) === this.selected) { // here typeof id is string
           if (this.messages[id].length > 1) {
@@ -1745,6 +1827,9 @@ export default {
       /* if positions are empty clear marker and line */
       if (!currentArrPos.length) {
         this.removeFlags(id)
+        if (this.tracks[id].coloured) {
+          this.tracks[id].coloured.remove()
+        }
         if (this.tracks[id].tail && this.tracks[id].tail instanceof L.Polyline) {
           this.tracks[id].tail.remove()
         }
@@ -1756,7 +1841,7 @@ export default {
         }
         // Clear all points
         this.clearAllPoints(id)
-        
+
         if (this.tracks[id] instanceof L.Polyline) {
           this.map.removeLayer(this.tracks[id])
         }
@@ -1792,6 +1877,7 @@ export default {
         
         this.markers[id].main.setOpacity(1)
         this.tracks[id].setLatLngs(currentArrPos)
+        this.buildColouredTrack(id)
       }
     },
     updateStateByMessages (messages) {
@@ -1900,11 +1986,11 @@ export default {
       this.devicesState[id].telemetryTail.push([lat, lon])
 
       /* update marker and track on the map */
-      if (this.markers[id] instanceof L.Marker) {
+      if (this.markers[id] && this.markers[id].main && this.markers[id].main instanceof L.Marker) {
         const direction = (telemetry.telemetry['position.direction'] && (Math.abs(Number.parseFloat(telemetry.telemetry['position.direction'].ts)) - latTs) < 0.1) ?
                           Number.parseInt(telemetry.telemetry['position.direction'].value) : 0
         this.updateMarkerDirection(id, direction)
-        this.markers[id].setLatLng([lat, lon]).update()
+        this.markers[id].main.setLatLng([lat, lon]).update()
       }
       if (this.tracks[id] instanceof L.Polyline) {
         this.tracks[id].setLatLngs(this.devicesState[id].telemetryTail)
@@ -1996,13 +2082,9 @@ export default {
     },
     'params.needShowNamesOnMap': function (needShowNamesOnMap) {
       Object.keys(this.markers).forEach(id => {
-        const currentDevice = this.activeDevices.filter(device => device.id === parseInt(id))[0],
-          position = this.messages[id] && this.messages[id].length ? [this.messages[id][this.messages[id].length - 1]['position.latitude'], this.messages[id][this.messages[id].length - 1]['position.longitude']] : [],
-          name = currentDevice.name || `#${id}`
         if (this.markers[id].main && this.markers[id].main instanceof L.Marker) {
-          this.markers[id].main.remove()
-          this.map.removeLayer(this.markers[id].accuracy)
-          this.initMarker(id, name, position)
+          // Just refresh historical points — they pick up the new needShowNamesOnMap value
+          this.initAllPoints(id)
         }
       })
     },
@@ -2017,6 +2099,7 @@ export default {
           // Update the track with filtered coordinates
           const newCoords = this.getLatLngArrByDevice(id);
           this.tracks[id].setLatLngs(newCoords);
+          this.buildColouredTrack(id);
           
           // If we have active tails or overviews, update them too
           if (this.tracks[id].tail && this.tracks[id].tail instanceof L.Polyline) {
